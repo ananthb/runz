@@ -44,38 +44,18 @@ pub fn writeOciLayout(
         dir.makePath("blobs/sha256") catch return error.IoError;
     }
 
-    // 2. Create gzipped tar layer from rootfs
+    // 2. Create tar layer from rootfs (uncompressed — no gzip dependency)
     const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";
-    const tmp_layer = try std.fmt.allocPrint(allocator, "{s}/oci-layer-{x}.tar.gz", .{ tmp_dir, @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))) });
-    defer allocator.free(tmp_layer);
-    defer std.fs.deleteFileAbsolute(tmp_layer) catch {};
+    const tmp_tar = try std.fmt.allocPrint(allocator, "{s}/oci-layer-{x}.tar", .{ tmp_dir, @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))) });
+    defer allocator.free(tmp_tar);
+    defer std.fs.deleteFileAbsolute(tmp_tar) catch {};
 
-    const tar_cmd = try std.fmt.allocPrint(
-        allocator,
-        "tar czf {s} --sort=name -C {s} .",
-        .{ tmp_layer, rootfs_dir },
-    );
-    defer allocator.free(tar_cmd);
+    try createTarFromDir(rootfs_dir, tmp_tar, allocator);
 
-    {
-        var child = std.process.Child.init(&.{ "sh", "-c", tar_cmd }, allocator);
-        child.spawn() catch return error.IoError;
-        const term = child.wait() catch return error.IoError;
-        switch (term) {
-            .Exited => |code| {
-                if (code != 0) {
-                    scoped_log.err("tar failed with exit code {}", .{code});
-                    return error.IoError;
-                }
-            },
-            else => return error.IoError,
-        }
-    }
-
-    // 3. Compute sha256 of layer blob, get its size, move to blobs
-    const layer_hash_hex = try hashFile(tmp_layer);
+    // 3. Compute sha256 of layer, get size, copy to blobs
+    const layer_hash_hex = try hashFile(tmp_tar);
     const layer_size = blk: {
-        const file = try std.fs.openFileAbsolute(tmp_layer, .{});
+        const file = try std.fs.openFileAbsolute(tmp_tar, .{});
         defer file.close();
         const stat = try file.stat();
         break :blk stat.size;
@@ -84,33 +64,10 @@ pub fn writeOciLayout(
     const layer_blob_path = try std.fmt.allocPrint(allocator, "{s}/blobs/sha256/{s}", .{ output_dir, &layer_hash_hex });
     defer allocator.free(layer_blob_path);
 
-    try copyFile(tmp_layer, layer_blob_path);
+    try copyFile(tmp_tar, layer_blob_path);
 
-    // Compute diffID (sha256 of uncompressed tar)
-    const tmp_uncompressed = try std.fmt.allocPrint(allocator, "{s}/oci-layer-{x}.tar", .{ tmp_dir, @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))) });
-    defer allocator.free(tmp_uncompressed);
-    defer std.fs.deleteFileAbsolute(tmp_uncompressed) catch {};
-
-    const gunzip_cmd = try std.fmt.allocPrint(
-        allocator,
-        "gunzip -c {s} > {s}",
-        .{ tmp_layer, tmp_uncompressed },
-    );
-    defer allocator.free(gunzip_cmd);
-
-    {
-        var child = std.process.Child.init(&.{ "sh", "-c", gunzip_cmd }, allocator);
-        child.spawn() catch return error.IoError;
-        const term = child.wait() catch return error.IoError;
-        switch (term) {
-            .Exited => |code| {
-                if (code != 0) return error.IoError;
-            },
-            else => return error.IoError,
-        }
-    }
-
-    const diff_id_hex = try hashFile(tmp_uncompressed);
+    // diffID = layer hash (same since uncompressed)
+    const diff_id_hex = layer_hash_hex;
 
     // 4. Build OCI image config JSON using ocispec types
     const arch_str = oci_registry.getPlatformArch() orelse "amd64";
@@ -163,7 +120,7 @@ pub fn writeOciLayout(
     defer allocator.free(config_digest_str);
 
     var layers_array = [_]ocispec.image.Descriptor{.{
-        .mediaType = .ImageLayerGzip,
+        .mediaType = .ImageLayer,
         .digest = try ocispec.image.Digest.initFromString(allocator, layer_digest_str),
         .size = layer_size,
     }};
@@ -301,6 +258,54 @@ pub fn buildJsonStringArray(allocator: std.mem.Allocator, items: []const []const
     const joined = try std.mem.join(allocator, ",", parts.items);
     defer allocator.free(joined);
     return try std.fmt.allocPrint(allocator, "[{s}]", .{joined});
+}
+
+/// Create an uncompressed tar archive from a directory using std.tar.Writer.
+/// Replaces the external `tar cf` shell-out.
+pub fn createTarFromDir(rootfs_dir: []const u8, output_path: []const u8, allocator: std.mem.Allocator) !void {
+    // Open the source directory
+    var source_dir = try std.fs.openDirAbsolute(rootfs_dir, .{ .iterate = true });
+    defer source_dir.close();
+
+    // Create the output tar file
+    const out_dir_path = std.fs.path.dirname(output_path) orelse "/";
+    var out_dir = try std.fs.openDirAbsolute(out_dir_path, .{});
+    defer out_dir.close();
+    var out_file = try out_dir.createFile(std.fs.path.basename(output_path), .{});
+    defer out_file.close();
+
+    var write_buf: [32768]u8 = undefined;
+    var file_writer = out_file.writer(&write_buf);
+
+    var tar_writer: std.tar.Writer = .{ .underlying_writer = &file_writer.interface };
+
+    // Walk the source directory recursively and add entries
+    var walker = try source_dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next()) |entry| {
+        switch (entry.kind) {
+            .directory => {
+                try tar_writer.writeDir(entry.path, .{});
+            },
+            .file => {
+                const file = try entry.dir.openFile(entry.basename, .{});
+                defer file.close();
+                const stat = try file.stat();
+                var file_read_buf: [32768]u8 = undefined;
+                var reader = file.reader(&file_read_buf);
+                try tar_writer.writeFile(entry.path, &reader, stat.mtime);
+            },
+            .sym_link => {
+                var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const link_name = try source_dir.readLink(entry.path, &link_buf);
+                try tar_writer.writeLink(entry.path, link_name, .{});
+            },
+            else => {},
+        }
+    }
+
+    try tar_writer.finishPedantically();
+    try file_writer.interface.flush();
 }
 
 /// Compute sha256 hex of a file on disk

@@ -44,7 +44,8 @@ pub const ExtractOptions = struct {
     overwrite: bool = true,
 };
 
-/// Extract a layer tarball to a directory
+/// Extract a layer tarball to a directory using Zig's std.tar and
+/// std.compress for decompression (no external tar/gzip/zstd binaries).
 pub fn extractLayer(
     layer_path: []const u8,
     compression: Compression,
@@ -53,60 +54,51 @@ pub fn extractLayer(
 ) LayerError!void {
     scoped_log.info("Extracting layer {s} to {s}", .{ layer_path, options.target });
 
-    // Build tar command based on compression
-    const decompress_flag: []const u8 = switch (compression) {
-        .none => "",
-        .gzip => "-z",
-        .zstd => "--zstd",
+    // Open the layer file
+    const file = std.fs.openFileAbsolute(layer_path, .{}) catch |err| {
+        scoped_log.err("Failed to open layer file {s}: {}", .{ layer_path, err });
+        return err;
     };
+    defer file.close();
 
-    var argv_buf: [10][]const u8 = undefined;
-    var argc: usize = 0;
+    // Create a file reader
+    var read_buf: [32768]u8 = undefined;
+    var file_reader = file.reader(&read_buf);
 
-    argv_buf[argc] = "tar";
-    argc += 1;
-    argv_buf[argc] = "-x";
-    argc += 1;
-
-    if (decompress_flag.len > 0) {
-        argv_buf[argc] = decompress_flag;
-        argc += 1;
-    }
-
-    argv_buf[argc] = "-f";
-    argc += 1;
-    argv_buf[argc] = layer_path;
-    argc += 1;
-    argv_buf[argc] = "-C";
-    argc += 1;
-    argv_buf[argc] = options.target;
-    argc += 1;
-
-    if (options.preserve_permissions) {
-        argv_buf[argc] = "-p";
-        argc += 1;
-    }
-
-    const argv = argv_buf[0..argc];
-
-    scoped_log.debug("Running: tar {s}", .{layer_path});
-
-    var child = std.process.Child.init(argv, allocator);
-    child.stderr_behavior = .Pipe;
-
-    child.spawn() catch |err| {
-        scoped_log.err("Failed to spawn tar: {}", .{err});
+    // Open the target directory
+    var dir = std.fs.openDirAbsolute(options.target, .{}) catch |err| {
+        scoped_log.err("Failed to open target directory {s}: {}", .{ options.target, err });
         return error.ExtractionFailed;
     };
+    defer dir.close();
 
-    const result = child.wait() catch |err| {
-        scoped_log.err("Failed to wait for tar: {}", .{err});
-        return error.ExtractionFailed;
-    };
-
-    if (result.Exited != 0) {
-        scoped_log.err("tar exited with status {}", .{result.Exited});
-        return error.ExtractionFailed;
+    // Set up decompression based on compression type and extract
+    switch (compression) {
+        .none => {
+            scoped_log.debug("Extracting uncompressed tar {s}", .{layer_path});
+            std.tar.pipeToFileSystem(dir, &file_reader.interface, .{}) catch |err| {
+                scoped_log.err("Failed to extract tar: {}", .{err});
+                return error.ExtractionFailed;
+            };
+        },
+        .gzip => {
+            scoped_log.debug("Extracting gzip-compressed tar {s}", .{layer_path});
+            var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+            var decompressor = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &decompress_buf);
+            std.tar.pipeToFileSystem(dir, &decompressor.reader, .{}) catch |err| {
+                scoped_log.err("Failed to extract gzip tar: {}", .{err});
+                return error.ExtractionFailed;
+            };
+        },
+        .zstd => {
+            scoped_log.debug("Extracting zstd-compressed tar {s}", .{layer_path});
+            var zstd_buf: [std.compress.zstd.default_window_len + std.compress.zstd.block_size_max]u8 = undefined;
+            var decompressor = std.compress.zstd.Decompress.init(&file_reader.interface, &zstd_buf, .{});
+            std.tar.pipeToFileSystem(dir, &decompressor.reader, .{}) catch |err| {
+                scoped_log.err("Failed to extract zstd tar: {}", .{err});
+                return error.ExtractionFailed;
+            };
+        },
     }
 
     // Handle whiteout files if requested
