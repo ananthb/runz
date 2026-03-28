@@ -71,7 +71,7 @@ pub const RegistryClient = struct {
 
     /// Probe /v2/ for auth challenge, parse WWW-Authenticate, fetch token
     pub fn ensureAuth(self: *Self, repository: []const u8) RegistryError!void {
-        scoped_log.info("Authenticating with {s} for {s}", .{ self.registry, repository });
+        scoped_log.debug("Authenticating with {s} for {s}", .{ self.registry, repository });
 
         const v2_url = std.fmt.allocPrint(
             self.allocator,
@@ -88,7 +88,7 @@ pub const RegistryClient = struct {
         defer result.deinit(self.allocator);
 
         if (result.status == .ok) {
-            scoped_log.info("No authentication required", .{});
+            scoped_log.debug("No authentication required", .{});
             return;
         }
 
@@ -135,7 +135,7 @@ pub const RegistryClient = struct {
 
         if (self.auth_token) |old| self.allocator.free(old);
         self.auth_token = token;
-        scoped_log.info("Authentication successful (token: {d} bytes)", .{token.len});
+        scoped_log.debug("Authentication successful (token: {d} bytes)", .{token.len});
     }
 
     /// GET manifest with Accept headers, returns JSON body (caller owns)
@@ -237,7 +237,7 @@ pub const RegistryClient = struct {
 
             const digest_val = m.object.get("digest") orelse continue;
 
-            scoped_log.info("Resolved platform manifest: {s}", .{
+            scoped_log.debug("Resolved platform manifest: {s}", .{
                 digest_val.string[0..@min(digest_val.string.len, 24)],
             });
 
@@ -290,36 +290,32 @@ pub const RegistryClient = struct {
 
     /// HTTP GET returning status + body + head bytes for auth handling
     fn httpGetRaw(self: *Self, url: []const u8, accept: ?[]const u8) RegistryError!HttpResult {
-        scoped_log.info("httpGetRaw: url={s}, has_token={}", .{ url, self.auth_token != null });
+        scoped_log.debug("httpGetRaw: url={s}, has_token={}", .{ url, self.auth_token != null });
         const uri = std.Uri.parse(url) catch {
             scoped_log.err("Failed to parse URL: {s}", .{url});
             return error.HttpError;
         };
 
-        // Build extra headers (Accept)
-        var extra_headers_buf: [1]std.http.Header = undefined;
+        // Build extra headers (Accept + Authorization)
+        var extra_headers_buf: [2]std.http.Header = undefined;
         var extra_count: usize = 0;
         if (accept) |a| {
-            extra_headers_buf[0] = .{ .name = "Accept", .value = a };
-            extra_count = 1;
+            extra_headers_buf[extra_count] = .{ .name = "Accept", .value = a };
+            extra_count += 1;
         }
 
-        // Build privileged headers (Authorization - stripped on cross-domain redirect)
-        var priv_headers_buf: [1]std.http.Header = undefined;
-        var priv_count: usize = 0;
+        var auth_value: ?[]const u8 = null;
+        defer if (auth_value) |av| self.allocator.free(av);
+
         if (self.auth_token) |token| {
-            scoped_log.info("Using auth token ({d} bytes)", .{token.len});
-            const auth_value = std.fmt.allocPrint(
+            scoped_log.debug("Using auth token ({d} bytes)", .{token.len});
+            auth_value = std.fmt.allocPrint(
                 self.allocator,
                 "Bearer {s}",
                 .{token},
             ) catch return error.OutOfMemory;
-            defer self.allocator.free(auth_value);
-
-            priv_headers_buf[0] = .{ .name = "Authorization", .value = auth_value };
-            priv_count = 1;
-
-            return self.doHttpGetRaw(uri, extra_headers_buf[0..extra_count], priv_headers_buf[0..priv_count]);
+            extra_headers_buf[extra_count] = .{ .name = "Authorization", .value = auth_value.? };
+            extra_count += 1;
         }
 
         return self.doHttpGetRaw(uri, extra_headers_buf[0..extra_count], &.{});
@@ -349,7 +345,7 @@ pub const RegistryClient = struct {
             return error.ConnectionFailed;
         };
 
-        scoped_log.info("HTTP {s} returned {}", .{ @tagName(response.head.status), @intFromEnum(response.head.status) });
+        scoped_log.debug("HTTP {s} returned {}", .{ @tagName(response.head.status), @intFromEnum(response.head.status) });
 
         // Dupe head bytes before calling reader() which invalidates them
         const head_bytes_copy = self.allocator.dupe(u8, response.head.bytes) catch return error.OutOfMemory;
@@ -368,33 +364,59 @@ pub const RegistryClient = struct {
         };
     }
 
-    /// Download URL contents to a file, streaming to avoid holding in memory
+    /// Download URL contents to a file, streaming to avoid holding in memory.
+    /// Handles redirects manually: sends Authorization on initial request,
+    /// strips it on cross-domain redirects (CDN).
     fn httpDownloadToFile(self: *Self, url: []const u8, output_path: []const u8) RegistryError!void {
+        // First request: with auth, no automatic redirects
+        const initial_result = self.httpGetRaw(url, null) catch |err| {
+            scoped_log.err("Download initial request failed: {}", .{err});
+            return err;
+        };
+
+        const status_int = @intFromEnum(initial_result.status);
+        if (status_int >= 300 and status_int < 400) {
+            // Redirect — follow without auth (CDN)
+            defer initial_result.deinit(self.allocator);
+            const location = if (initial_result.head_bytes) |hb|
+                findHeader(hb, "location")
+            else
+                null;
+
+            if (location) |loc| {
+                scoped_log.debug("Following blob redirect to CDN", .{});
+                return self.httpDownloadToFileRaw(loc, output_path);
+            }
+            scoped_log.err("Redirect with no Location header", .{});
+            return error.HttpError;
+        }
+
+        if (initial_result.status != .ok) {
+            defer initial_result.deinit(self.allocator);
+            scoped_log.err("Download returned status {}", .{status_int});
+            return error.BlobNotFound;
+        }
+
+        // 200 — no redirect, but we already consumed the body into memory via httpGetRaw.
+        // Write it to file.
+        defer initial_result.deinit(self.allocator);
+        const dir_path = std.fs.path.dirname(output_path) orelse "/";
+        var dir = std.fs.openDirAbsolute(dir_path, .{}) catch return error.IoError;
+        defer dir.close();
+
+        var file = dir.createFile(std.fs.path.basename(output_path), .{}) catch return error.IoError;
+        defer file.close();
+        file.writeAll(initial_result.body) catch return error.IoError;
+    }
+
+    /// Download a URL to file without auth headers, following redirects.
+    fn httpDownloadToFileRaw(self: *Self, url: []const u8, output_path: []const u8) RegistryError!void {
         const uri = std.Uri.parse(url) catch {
             scoped_log.err("Failed to parse URL: {s}", .{url});
             return error.HttpError;
         };
 
-        // Build privileged headers (Authorization - stripped on CDN redirect)
-        var priv_headers_buf: [1]std.http.Header = undefined;
-        var priv_count: usize = 0;
-
-        // We need the auth_value to outlive the request, so allocate here
-        var auth_value: ?[]const u8 = null;
-        defer if (auth_value) |av| self.allocator.free(av);
-
-        if (self.auth_token) |token| {
-            auth_value = std.fmt.allocPrint(
-                self.allocator,
-                "Bearer {s}",
-                .{token},
-            ) catch return error.OutOfMemory;
-            priv_headers_buf[0] = .{ .name = "Authorization", .value = auth_value.? };
-            priv_count = 1;
-        }
-
         var req = self.http_client.request(.GET, uri, .{
-            .privileged_headers = priv_headers_buf[0..priv_count],
             .redirect_behavior = @enumFromInt(10),
         }) catch {
             return error.ConnectionFailed;
@@ -411,7 +433,7 @@ pub const RegistryClient = struct {
         };
 
         if (response.head.status != .ok) {
-            scoped_log.err("Download returned status {}", .{@intFromEnum(response.head.status)});
+            scoped_log.err("CDN download returned status {}", .{@intFromEnum(response.head.status)});
             return error.BlobNotFound;
         }
 
@@ -511,7 +533,7 @@ pub fn pullImage(
     };
     defer resolved.deinit(allocator);
 
-    scoped_log.info("Resolved manifest digest: {s}", .{
+    scoped_log.debug("Resolved manifest digest: {s}", .{
         resolved.digest[0..@min(resolved.digest.len, 24)],
     });
 
@@ -554,7 +576,7 @@ pub fn pullImage(
     // Download config blob
     if (parsed.value.object.get("config")) |config_desc| {
         if (config_desc.object.get("digest")) |config_digest| {
-            scoped_log.info("Downloading config {s}", .{
+            scoped_log.debug("Downloading config {s}", .{
                 config_digest.string[0..@min(config_digest.string.len, 24)],
             });
             const config_hash = config_digest.string[7..]; // strip "sha256:"
@@ -575,7 +597,7 @@ pub fn pullImage(
 
         for (layers.array.items, 0..) |layer, i| {
             const layer_digest = layer.object.get("digest") orelse continue;
-            scoped_log.info("Downloading layer {}/{} {s}", .{
+            scoped_log.debug("Downloading layer {}/{} {s}", .{
                 i + 1,
                 layers.array.items.len,
                 layer_digest.string[0..@min(layer_digest.string.len, 19)],

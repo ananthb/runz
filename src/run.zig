@@ -7,6 +7,9 @@ const seccomp = @import("linux/seccomp.zig");
 const namespace = @import("linux/namespace.zig");
 const dev = @import("linux/dev.zig");
 
+const veth = @import("linux/veth.zig");
+const netlink = @import("linux/netlink.zig");
+
 const scoped_log = log.scoped("run");
 
 pub const RunError = error{
@@ -27,19 +30,25 @@ pub const RunOptions = struct {
     network: bool = true,
 };
 
-/// Execute a command inside a rootfs with container isolation.
+pub const NetworkMode = enum {
+    /// Isolated network namespace with veth pair + NAT (default)
+    veth,
+    /// Share host network namespace
+    host,
+    /// Isolated network namespace with no connectivity
+    none,
+};
+
+pub const ContainerOptions = struct {
+    /// Environment variables (null = default PATH/HOME/TERM)
+    env: ?[]const []const u8 = null,
+    /// Network mode
+    network: NetworkMode = .veth,
+};
+
+/// Execute a short-lived command inside a rootfs with container isolation.
 /// Sets up namespaces, mounts, seccomp, and minimal /dev.
 pub fn executeInRootfs(
-    allocator: std.mem.Allocator,
-    rootfs_path: []const u8,
-    argv: []const []const u8,
-    env: ?[]const []const u8,
-) RunError!void {
-    return executeInRootfsWithOptions(allocator, rootfs_path, argv, env, .{});
-}
-
-/// Execute a command inside a rootfs with container isolation and custom options.
-pub fn executeInRootfsWithOptions(
     allocator: std.mem.Allocator,
     rootfs_path: []const u8,
     argv: []const []const u8,
@@ -65,6 +74,311 @@ pub fn executeInRootfsWithOptions(
         .privileged => return executeWithPrivilegedIsolation(allocator, rootfs_path, argv, env, options),
         .chroot_only => return executeWithChrootOnly(allocator, rootfs_path, argv, env),
     }
+}
+
+/// Run a long-lived container: sets up mount+PID namespaces, pivot_root into
+/// the rootfs, and execs the entrypoint. The parent waits for the child.
+/// Unlike executeInRootfs (designed for short RUN commands), this uses
+/// pivot_root for a proper rootfs swap and binds /dev from the host
+/// (including /dev/net/tun for VPN/WireGuard).
+pub fn runContainer(
+    allocator: std.mem.Allocator,
+    rootfs_path: []const u8,
+    argv: []const []const u8,
+    options: ContainerOptions,
+) RunError!u8 {
+    if (argv.len == 0) return 0;
+
+    scoped_log.info("Starting container: {s} (network={s})", .{ argv[0], @tagName(options.network) });
+
+    const host_veth_name = "veth-oci-h";
+    const guest_veth_name = "veth-oci-g";
+
+    // For veth mode: create the pair before forking (in host netns)
+    if (options.network == .veth) {
+        veth.createVethPair(host_veth_name, guest_veth_name) catch |err| {
+            scoped_log.warn("Failed to create veth pair: {}, falling back to host networking", .{err});
+            var fallback = options;
+            fallback.network = .host;
+            return runContainer(allocator, rootfs_path, argv, fallback);
+        };
+    }
+
+    // Create sync pipe for veth mode
+    const pipe = if (options.network == .veth)
+        std.posix.pipe() catch return error.SetupFailed
+    else
+        .{ @as(std.posix.fd_t, -1), @as(std.posix.fd_t, -1) };
+
+    const fork_result = doFork();
+    if (fork_result == null) {
+        scoped_log.err("fork failed", .{});
+        return error.CommandFailed;
+    }
+
+    const child_pid = fork_result.?;
+
+    if (child_pid == 0) {
+        // === CHILD ===
+        if (pipe[1] != -1) std.posix.close(pipe[1]);
+
+        // Unshare mount + PID + optionally network
+        var ns_flags: u32 = syscall.CloneFlags.CLONE_NEWNS | syscall.CloneFlags.CLONE_NEWPID;
+        if (options.network != .host) {
+            ns_flags |= syscall.CloneFlags.CLONE_NEWNET;
+        }
+        syscall.unshareRaw(ns_flags) catch |err| {
+            scoped_log.err("Failed to unshare namespaces: {}", .{err});
+            std.process.exit(126);
+        };
+
+        // Wait for parent to set up host-side networking
+        if (pipe[0] != -1) {
+            var wait_buf: [1]u8 = undefined;
+            _ = std.posix.read(pipe[0], &wait_buf) catch {};
+            std.posix.close(pipe[0]);
+
+            // Configure guest networking
+            veth.setLoopbackUp() catch {};
+            veth.setUp(guest_veth_name) catch {};
+            veth.addAddress(guest_veth_name, netlink.ipv4(10, 200, 0, 2), 24) catch {};
+            veth.addDefaultRoute(netlink.ipv4(10, 200, 0, 1), guest_veth_name) catch {};
+        }
+
+        // Make root private to prevent mount propagation
+        syscall.mount(null, "/", null, .{ .private = true, .rec = true }, null) catch {};
+
+        // Setup mounts in rootfs
+        setupContainerMounts(allocator, rootfs_path) catch |err| {
+            scoped_log.warn("Container mount setup failed: {}", .{err});
+        };
+
+        // Copy DNS config
+        setupDns(allocator, rootfs_path) catch {};
+
+        // Double-fork for PID namespace (grandchild becomes PID 1)
+        const inner_result = doFork();
+        if (inner_result == null) {
+            scoped_log.err("inner fork failed", .{});
+            std.process.exit(126);
+        }
+
+        const grandchild_pid = inner_result.?;
+        if (grandchild_pid == 0) {
+            pivotAndExec(allocator, rootfs_path, argv, options.env);
+            std.process.exit(127);
+        }
+
+        const status = waitForChild(grandchild_pid);
+        std.process.exit(status);
+    }
+
+    // === PARENT ===
+    if (pipe[0] != -1) std.posix.close(pipe[0]);
+
+    if (options.network == .veth) {
+        // Move guest veth into child's network namespace
+        veth.moveToNamespace(guest_veth_name, child_pid) catch |err| {
+            scoped_log.warn("Failed to move veth to child ns: {}", .{err});
+        };
+
+        // Configure host side
+        veth.addAddress(host_veth_name, netlink.ipv4(10, 200, 0, 1), 24) catch |err| {
+            scoped_log.warn("Failed to configure host veth: {}", .{err});
+        };
+        veth.setUp(host_veth_name) catch |err| {
+            scoped_log.warn("Failed to bring up host veth: {}", .{err});
+        };
+
+        // Enable forwarding + NAT
+        veth.enableIpForwarding() catch {};
+        veth.setupMasquerade() catch |err| {
+            scoped_log.warn("Failed to setup NAT: {}", .{err});
+        };
+
+        // Signal child to proceed
+        _ = std.posix.write(pipe[1], "g") catch {};
+        std.posix.close(pipe[1]);
+    }
+
+    const exit_code = waitForChild(child_pid);
+
+    // Cleanup (veth is auto-destroyed when namespace dies, but clean up NAT)
+    if (options.network == .veth) {
+        veth.deleteInterface(host_veth_name);
+        veth.teardownMasquerade();
+    }
+
+    return exit_code;
+}
+
+/// Set up mounts for a container: bind /dev from host (for device access),
+/// mount proc, sysfs, tmpfs on /tmp, and ensure /dev/net/tun exists.
+fn setupContainerMounts(allocator: std.mem.Allocator, rootfs_path: []const u8) !void {
+    {
+        var dir = std.fs.openDirAbsolute(rootfs_path, .{}) catch return error.SetupFailed;
+        defer dir.close();
+        dir.makePath("proc") catch {};
+        dir.makePath("dev") catch {};
+        dir.makePath("dev/net") catch {};
+        dir.makePath("sys") catch {};
+        dir.makePath("etc") catch {};
+        dir.makePath("tmp") catch {};
+        dir.makePath("run") catch {};
+        dir.makePath("mnt/oldroot") catch {};
+    }
+
+    // Bind mount /dev from host (recursive — gets /dev/pts, /dev/shm, etc.)
+    {
+        const dev_path = std.fmt.allocPrint(allocator, "{s}/dev", .{rootfs_path}) catch return error.OutOfMemory;
+        defer allocator.free(dev_path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (dev_path.len < buf.len) {
+            @memcpy(buf[0..dev_path.len], dev_path);
+            buf[dev_path.len] = 0;
+            const z: [*:0]const u8 = @ptrCast(buf[0..dev_path.len :0]);
+            syscall.mount("/dev", z, null, .{ .bind = true, .rec = true }, null) catch |err| {
+                scoped_log.warn("Failed to bind mount /dev: {}", .{err});
+            };
+        }
+    }
+
+    // Mount proc
+    {
+        const path = std.fmt.allocPrint(allocator, "{s}/proc", .{rootfs_path}) catch return error.OutOfMemory;
+        defer allocator.free(path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (path.len < buf.len) {
+            @memcpy(buf[0..path.len], path);
+            buf[path.len] = 0;
+            const z: [*:0]const u8 = @ptrCast(buf[0..path.len :0]);
+            syscall.mount("proc", z, "proc", .{ .nosuid = true, .noexec = true, .nodev = true }, null) catch {};
+        }
+    }
+
+    // Bind mount /sys
+    {
+        const path = std.fmt.allocPrint(allocator, "{s}/sys", .{rootfs_path}) catch return error.OutOfMemory;
+        defer allocator.free(path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (path.len < buf.len) {
+            @memcpy(buf[0..path.len], path);
+            buf[path.len] = 0;
+            const z: [*:0]const u8 = @ptrCast(buf[0..path.len :0]);
+            syscall.mount("/sys", z, null, .{ .bind = true, .rec = true }, null) catch {
+                syscall.mount("sysfs", z, "sysfs", .{ .rdonly = true, .nosuid = true, .noexec = true, .nodev = true }, null) catch {};
+            };
+        }
+    }
+
+    // Mount tmpfs on /tmp
+    {
+        const path = std.fmt.allocPrint(allocator, "{s}/tmp", .{rootfs_path}) catch return error.OutOfMemory;
+        defer allocator.free(path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (path.len < buf.len) {
+            @memcpy(buf[0..path.len], path);
+            buf[path.len] = 0;
+            const z: [*:0]const u8 = @ptrCast(buf[0..path.len :0]);
+            syscall.mount("tmpfs", z, "tmpfs", .{ .nosuid = true, .nodev = true }, @ptrCast("size=65536k,mode=1777")) catch {};
+        }
+    }
+
+    // Bind mount /run for runtime state
+    {
+        const path = std.fmt.allocPrint(allocator, "{s}/run", .{rootfs_path}) catch return error.OutOfMemory;
+        defer allocator.free(path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (path.len < buf.len) {
+            @memcpy(buf[0..path.len], path);
+            buf[path.len] = 0;
+            const z: [*:0]const u8 = @ptrCast(buf[0..path.len :0]);
+            syscall.mount("tmpfs", z, "tmpfs", .{ .nosuid = true, .nodev = true }, @ptrCast("size=65536k,mode=755")) catch {};
+        }
+    }
+}
+
+/// pivot_root into rootfs and exec the command
+fn pivotAndExec(
+    allocator: std.mem.Allocator,
+    rootfs_path: []const u8,
+    argv: []const []const u8,
+    env: ?[]const []const u8,
+) void {
+    // Ensure rootfs is a mount point (required by pivot_root)
+    {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (rootfs_path.len < buf.len) {
+            @memcpy(buf[0..rootfs_path.len], rootfs_path);
+            buf[rootfs_path.len] = 0;
+            const z: [*:0]const u8 = @ptrCast(buf[0..rootfs_path.len :0]);
+            syscall.mount(z, z, null, .{ .bind = true }, null) catch {};
+        }
+    }
+
+    // pivot_root
+    const old_root = std.fmt.allocPrint(allocator, "{s}/mnt/oldroot", .{rootfs_path}) catch return;
+    defer allocator.free(old_root);
+
+    const rootfs_z = allocator.dupeZ(u8, rootfs_path) catch return;
+    defer allocator.free(rootfs_z);
+    const old_root_z = allocator.dupeZ(u8, old_root) catch return;
+    defer allocator.free(old_root_z);
+
+    syscall.pivotRoot(rootfs_z, old_root_z) catch |err| {
+        scoped_log.err("pivot_root failed: {}, falling back to chroot", .{err});
+        syscall.chroot(rootfs_z) catch return;
+        syscall.chdir("/") catch return;
+        doExec(allocator, argv, env);
+        return;
+    };
+
+    syscall.chdir("/") catch return;
+
+    // Unmount old root (lazy)
+    {
+        const old_z = allocator.dupeZ(u8, "/mnt/oldroot") catch return;
+        defer allocator.free(old_z);
+        mount_util.umountDetach("/mnt/oldroot") catch {};
+    }
+
+    doExec(allocator, argv, env);
+}
+
+/// Build argv/envp and exec
+fn doExec(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    env: ?[]const []const u8,
+) void {
+    var c_argv: std.ArrayListUnmanaged(?[*:0]const u8) = .{};
+    for (argv) |arg| {
+        const z = allocator.dupeZ(u8, arg) catch return;
+        c_argv.append(allocator, z) catch return;
+    }
+    c_argv.append(allocator, null) catch return;
+
+    var c_envp: std.ArrayListUnmanaged(?[*:0]const u8) = .{};
+    if (env) |env_list| {
+        for (env_list) |e| {
+            const z = allocator.dupeZ(u8, e) catch return;
+            c_envp.append(allocator, z) catch return;
+        }
+    } else {
+        for ([_][]const u8{
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME=/root",
+            "TERM=xterm",
+        }) |e| {
+            const z = allocator.dupeZ(u8, e) catch return;
+            c_envp.append(allocator, z) catch return;
+        }
+    }
+    c_envp.append(allocator, null) catch return;
+
+    const cmd_z = allocator.dupeZ(u8, argv[0]) catch return;
+    const err = std.posix.execveZ(cmd_z, @ptrCast(c_argv.items.ptr), @ptrCast(c_envp.items.ptr));
+    scoped_log.err("execve failed: {}", .{err});
 }
 
 /// Full isolation: user namespace + mount + PID + network namespaces + seccomp
