@@ -8,18 +8,30 @@
       url = "github:cachix/git-hooks.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    oci-spec-zig = {
+      url = "github:navidys/oci-spec-zig";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, pre-commit-hooks }:
+  outputs = { self, nixpkgs, flake-utils, pre-commit-hooks, oci-spec-zig }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         version = if (self ? shortRev) then self.shortRev else "dev";
 
+        # Zig dependency hash must match build.zig.zon
+        ociSpecHash = "ocispec-0.4.0-dev-voj0cey1AgDS-1Itn3Xu5AiWtB6cwMddZtDUssOtWrIn";
+
+        # Pre-fetch zig deps for sandboxed builds
+        zigDepsDir = pkgs.runCommand "oci-zig-deps" {} ''
+          mkdir -p $out
+          ln -s ${oci-spec-zig} $out/${ociSpecHash}
+        '';
+
         pre-commit-check = pre-commit-hooks.lib.${system}.run {
           src = ./.;
           hooks = {
-            # Zig formatting
             zig-fmt = {
               enable = true;
               name = "zig fmt";
@@ -29,7 +41,6 @@
               args = [ "--check" "src/" ];
             };
 
-            # Trailing whitespace
             trailing-whitespace = {
               enable = true;
               name = "trailing whitespace";
@@ -48,13 +59,14 @@ sys.exit(0 if ok else 1)
             };
           };
         };
+
+        zigBuildArgs = "--system ${zigDepsDir}";
+
       in
       {
         checks = {
-          # Pre-commit hooks (formatting, linting)
           inherit pre-commit-check;
 
-          # Unit tests
           test = pkgs.stdenv.mkDerivation {
             pname = "oci-test";
             inherit version;
@@ -66,12 +78,11 @@ sys.exit(0 if ok else 1)
 
             buildPhase = ''
               export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
-              zig build test
+              zig build test ${zigBuildArgs}
               touch $out
             '';
           };
 
-          # Fuzz targets (run corpus as regular tests)
           fuzz = pkgs.stdenv.mkDerivation {
             pname = "oci-fuzz";
             inherit version;
@@ -83,12 +94,11 @@ sys.exit(0 if ok else 1)
 
             buildPhase = ''
               export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
-              zig build fuzz
+              zig build fuzz ${zigBuildArgs}
               touch $out
             '';
           };
 
-          # Zig formatting check
           fmt = pkgs.stdenv.mkDerivation {
             pname = "oci-fmt";
             inherit version;
@@ -105,7 +115,6 @@ sys.exit(0 if ok else 1)
             '';
           };
 
-          # Build check (ensure library compiles)
           build = pkgs.stdenv.mkDerivation {
             pname = "oci-build";
             inherit version;
@@ -117,7 +126,7 @@ sys.exit(0 if ok else 1)
 
             buildPhase = ''
               export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
-              zig build
+              zig build ${zigBuildArgs}
               touch $out
             '';
           };

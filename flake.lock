@@ -71,6 +71,22 @@
         "type": "github"
       }
     },
+    "oci-spec-zig": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1774654121,
+        "narHash": "sha256-IN8xlMJuJTnH669v1Ip1VFlu7JflaEcdSQKbE6wgTwI=",
+        "owner": "navidys",
+        "repo": "oci-spec-zig",
+        "rev": "9bb39600fb434e4ae34daed00fe7d9e48073b60a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "navidys",
+        "repo": "oci-spec-zig",
+        "type": "github"
+      }
+    },
     "pre-commit-hooks": {
       "inputs": {
         "flake-compat": "flake-compat",
@@ -97,6 +113,7 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
+        "oci-spec-zig": "oci-spec-zig",
         "pre-commit-hooks": "pre-commit-hooks"
       }
     },
