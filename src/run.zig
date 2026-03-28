@@ -104,11 +104,12 @@ pub fn runContainer(
         };
     }
 
-    // Create sync pipe for veth mode
-    const pipe = if (options.network == .veth)
-        std.posix.pipe() catch return error.SetupFailed
-    else
-        .{ @as(std.posix.fd_t, -1), @as(std.posix.fd_t, -1) };
+    // Create sync pipes for veth mode:
+    // pipe_to_parent: child signals "I've unshared" (child writes, parent reads)
+    // pipe_to_child: parent signals "network ready" (parent writes, child reads)
+    const use_veth = options.network == .veth;
+    const pipe_to_parent = if (use_veth) std.posix.pipe() catch return error.SetupFailed else .{ @as(std.posix.fd_t, -1), @as(std.posix.fd_t, -1) };
+    const pipe_to_child = if (use_veth) std.posix.pipe() catch return error.SetupFailed else .{ @as(std.posix.fd_t, -1), @as(std.posix.fd_t, -1) };
 
     const fork_result = doFork();
     if (fork_result == null) {
@@ -120,7 +121,8 @@ pub fn runContainer(
 
     if (child_pid == 0) {
         // === CHILD ===
-        if (pipe[1] != -1) std.posix.close(pipe[1]);
+        if (pipe_to_parent[0] != -1) std.posix.close(pipe_to_parent[0]); // close read end
+        if (pipe_to_child[1] != -1) std.posix.close(pipe_to_child[1]); // close write end
 
         // Unshare mount + PID + optionally network
         var ns_flags: u32 = syscall.CloneFlags.CLONE_NEWNS | syscall.CloneFlags.CLONE_NEWPID;
@@ -132,11 +134,15 @@ pub fn runContainer(
             std.process.exit(126);
         };
 
-        // Wait for parent to set up host-side networking
-        if (pipe[0] != -1) {
+        if (use_veth) {
+            // Signal parent: "I've unshared CLONE_NEWNET"
+            _ = std.posix.write(pipe_to_parent[1], "r") catch {};
+            std.posix.close(pipe_to_parent[1]);
+
+            // Wait for parent to finish host-side network setup
             var wait_buf: [1]u8 = undefined;
-            _ = std.posix.read(pipe[0], &wait_buf) catch {};
-            std.posix.close(pipe[0]);
+            _ = std.posix.read(pipe_to_child[0], &wait_buf) catch {};
+            std.posix.close(pipe_to_child[0]);
 
             // Configure guest networking
             veth.setLoopbackUp() catch {};
@@ -174,9 +180,15 @@ pub fn runContainer(
     }
 
     // === PARENT ===
-    if (pipe[0] != -1) std.posix.close(pipe[0]);
+    if (pipe_to_parent[1] != -1) std.posix.close(pipe_to_parent[1]); // close write end
+    if (pipe_to_child[0] != -1) std.posix.close(pipe_to_child[0]); // close read end
 
-    if (options.network == .veth) {
+    if (use_veth) {
+        // Wait for child to signal it has unshared CLONE_NEWNET
+        var ready_buf: [1]u8 = undefined;
+        _ = std.posix.read(pipe_to_parent[0], &ready_buf) catch {};
+        std.posix.close(pipe_to_parent[0]);
+
         // Move guest veth into child's network namespace
         veth.moveToNamespace(guest_veth_name, child_pid) catch |err| {
             scoped_log.warn("Failed to move veth to child ns: {}", .{err});
@@ -196,9 +208,9 @@ pub fn runContainer(
             scoped_log.warn("Failed to setup NAT: {}", .{err});
         };
 
-        // Signal child to proceed
-        _ = std.posix.write(pipe[1], "g") catch {};
-        std.posix.close(pipe[1]);
+        // Signal child: "network ready"
+        _ = std.posix.write(pipe_to_child[1], "g") catch {};
+        std.posix.close(pipe_to_child[1]);
     }
 
     const exit_code = waitForChild(child_pid);
