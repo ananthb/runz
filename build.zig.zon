@@ -4,7 +4,7 @@
     .fingerprint = 0xc674b497beecfed4,
     .dependencies = .{
         .ocispec = .{
-            .url = "git+https://github.com/navidys/oci-spec-zig",
+            .url = "git+https://github.com/navidys/oci-spec-zig#9bb39600fb434e4ae34daed00fe7d9e48073b60a",
             .hash = "ocispec-0.4.0-dev-voj0cey1AgDS-1Itn3Xu5AiWtB6cwMddZtDUssOtWrIn",
         },
     },

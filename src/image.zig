@@ -223,7 +223,12 @@ pub const ImageReference = struct {
                 std.mem.indexOf(u8, potential_registry, ":") != null or
                 std.mem.eql(u8, potential_registry, "localhost"))
             {
-                registry = try allocator.dupe(u8, potential_registry);
+                // Map docker.io to the actual API endpoint
+                if (std.mem.eql(u8, potential_registry, "docker.io")) {
+                    registry = try allocator.dupe(u8, default_registry);
+                } else {
+                    registry = try allocator.dupe(u8, potential_registry);
+                }
                 remaining = remaining[first_slash + 1 ..];
             } else {
                 registry = try allocator.dupe(u8, default_registry);

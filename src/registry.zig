@@ -135,7 +135,7 @@ pub const RegistryClient = struct {
 
         if (self.auth_token) |old| self.allocator.free(old);
         self.auth_token = token;
-        scoped_log.info("Authentication successful", .{});
+        scoped_log.info("Authentication successful (token: {d} bytes)", .{token.len});
     }
 
     /// GET manifest with Accept headers, returns JSON body (caller owns)
@@ -290,6 +290,7 @@ pub const RegistryClient = struct {
 
     /// HTTP GET returning status + body + head bytes for auth handling
     fn httpGetRaw(self: *Self, url: []const u8, accept: ?[]const u8) RegistryError!HttpResult {
+        scoped_log.info("httpGetRaw: url={s}, has_token={}", .{ url, self.auth_token != null });
         const uri = std.Uri.parse(url) catch {
             scoped_log.err("Failed to parse URL: {s}", .{url});
             return error.HttpError;
@@ -307,6 +308,7 @@ pub const RegistryClient = struct {
         var priv_headers_buf: [1]std.http.Header = undefined;
         var priv_count: usize = 0;
         if (self.auth_token) |token| {
+            scoped_log.info("Using auth token ({d} bytes)", .{token.len});
             const auth_value = std.fmt.allocPrint(
                 self.allocator,
                 "Bearer {s}",
@@ -346,6 +348,8 @@ pub const RegistryClient = struct {
         var response = req.receiveHead(&redirect_buf) catch {
             return error.ConnectionFailed;
         };
+
+        scoped_log.info("HTTP {s} returned {}", .{ @tagName(response.head.status), @intFromEnum(response.head.status) });
 
         // Dupe head bytes before calling reader() which invalidates them
         const head_bytes_copy = self.allocator.dupe(u8, response.head.bytes) catch return error.OutOfMemory;
