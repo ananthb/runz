@@ -29,3 +29,6 @@ pub const containerfile = @import("containerfile.zig");
 
 /// Container command execution (RUN support via chroot)
 pub const run = @import("run.zig");
+
+/// Linux-specific utilities (namespaces, mounts, seccomp, device setup)
+pub const linux_util = @import("linux.zig");
