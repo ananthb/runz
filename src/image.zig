@@ -286,12 +286,15 @@ pub fn isLocalImage(path: []const u8) bool {
         return true;
     }
 
-    // Check for OCI layout directory
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const oci_layout_path = std.fmt.bufPrint(&buf, "{s}/oci-layout", .{path}) catch return false;
+    // Check for OCI layout directory (only for absolute or explicit relative paths)
+    if (std.mem.startsWith(u8, path, "/") or std.mem.startsWith(u8, path, "./")) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const oci_layout_path = std.fmt.bufPrint(&buf, "{s}/oci-layout", .{path}) catch return false;
+        std.fs.accessAbsolute(oci_layout_path, .{}) catch return false;
+        return true;
+    }
 
-    std.fs.accessAbsolute(oci_layout_path, .{}) catch return false;
-    return true;
+    return false;
 }
 
 test "parse simple image reference" {
