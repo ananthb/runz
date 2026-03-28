@@ -71,6 +71,23 @@ sys.exit(0 if ok else 1)
             '';
           };
 
+          # Fuzz targets (run corpus as regular tests)
+          fuzz = pkgs.stdenv.mkDerivation {
+            pname = "oci-fuzz";
+            inherit version;
+            src = ./.;
+
+            nativeBuildInputs = [ pkgs.zig ];
+            dontConfigure = true;
+            dontInstall = true;
+
+            buildPhase = ''
+              export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
+              zig build fuzz
+              touch $out
+            '';
+          };
+
           # Zig formatting check
           fmt = pkgs.stdenv.mkDerivation {
             pname = "oci-fmt";
@@ -112,6 +129,7 @@ sys.exit(0 if ok else 1)
           buildInputs = with pkgs; [
             zig
             zls
+            valgrind
           ];
         };
       }
