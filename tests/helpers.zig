@@ -19,13 +19,27 @@ pub fn createTestBundle(allocator: std.mem.Allocator, config_json: []const u8) !
     };
     for (dirs) |d| dir.makePath(d) catch {};
 
-    // Copy busybox into rootfs (prefer static for container use)
-    const busybox_paths = [_][]const u8{
+    // Copy busybox into rootfs.
+    // BUSYBOX env var overrides, then try common paths (prefer static for container use).
+    const env_busybox = std.posix.getenv("BUSYBOX");
+    const busybox_search = [_][]const u8{
         "/nix/store/8mf4s8c4xjvlkj12p299qylrb30g7zzh-busybox-static-x86_64-unknown-linux-musl-1.37.0/bin/busybox",
         "/bin/busybox",
-        "/nix/store/6in5jlbspq9szjvlrdxq9rpmxyvca529-busybox-1.37.0/bin/busybox",
         "/usr/bin/busybox",
     };
+    var busybox_paths_buf: [4][]const u8 = undefined;
+    var busybox_count: usize = 0;
+    if (env_busybox) |eb| {
+        busybox_paths_buf[busybox_count] = eb;
+        busybox_count += 1;
+    }
+    for (busybox_search) |p| {
+        if (busybox_count < busybox_paths_buf.len) {
+            busybox_paths_buf[busybox_count] = p;
+            busybox_count += 1;
+        }
+    }
+    const busybox_paths = busybox_paths_buf[0..busybox_count];
     var copied = false;
     for (busybox_paths) |src| {
         const dest = std.fmt.allocPrint(allocator, "{s}/rootfs/bin/busybox", .{bundle}) catch continue;

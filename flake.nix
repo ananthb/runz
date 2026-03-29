@@ -149,6 +149,38 @@ sys.exit(0 if ok else 1)
               touch $out
             '';
           };
+
+          test-integration = pkgs.stdenv.mkDerivation {
+            pname = "runz-test-integration";
+            inherit version;
+            src = ./.;
+
+            nativeBuildInputs = [ pkgs.zig ];
+            dontConfigure = true;
+            dontInstall = true;
+
+            buildPhase = ''
+              export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
+              zig build test-integration ${zigBuildArgs}
+              touch $out
+            '';
+          };
+
+          test-cli = pkgs.stdenv.mkDerivation {
+            pname = "runz-test-cli";
+            inherit version;
+            src = ./.;
+
+            nativeBuildInputs = [ pkgs.zig ];
+            dontConfigure = true;
+            dontInstall = true;
+
+            buildPhase = ''
+              export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
+              zig build test-cli ${zigBuildArgs}
+              touch $out
+            '';
+          };
         };
 
         devShells.default = pkgs.mkShell {

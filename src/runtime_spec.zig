@@ -99,7 +99,8 @@ pub const PidsResources = struct {
 };
 
 pub const Seccomp = struct {
-    defaultAction: []const u8 = "SCMP_ACT_ERRNO",
+    /// Always allocated when parsed from JSON. Callers must free.
+    defaultAction: []const u8,
     architectures: ?[]const []const u8 = null,
     syscalls: ?[]const SyscallRule = null,
 };
@@ -239,10 +240,11 @@ fn parseConfigManual(allocator: std.mem.Allocator, data: []const u8) !Spec {
         }
         // Parse seccomp
         if (lnx.object.get("seccomp")) |sec| {
-            var seccomp_spec = Seccomp{};
-            if (sec.object.get("defaultAction")) |da| {
-                if (da == .string) seccomp_spec.defaultAction = try allocator.dupe(u8, da.string);
-            }
+            const default_action = if (sec.object.get("defaultAction")) |da|
+                (if (da == .string) try allocator.dupe(u8, da.string) else try allocator.dupe(u8, "SCMP_ACT_ERRNO"))
+            else
+                try allocator.dupe(u8, "SCMP_ACT_ERRNO");
+            var seccomp_spec = Seccomp{ .defaultAction = default_action };
             if (sec.object.get("architectures")) |arches| {
                 seccomp_spec.architectures = try parseStringArray(allocator, arches);
             }

@@ -99,6 +99,8 @@ fn cmdRun(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--bundle")) {
             bundle = args.next() orelse return fatal("--bundle requires a path");
+        } else if (std.mem.eql(u8, arg, "--")) {
+            break; // remaining args handled below
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (container_id == null) {
                 container_id = arg;
