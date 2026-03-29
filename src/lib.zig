@@ -1,8 +1,49 @@
-//! runz - OCI container runtime and library
+//! # runz - OCI Container Runtime & Library
 //!
-//! Container runtime with image pulling, layer extraction,
-//! namespace isolation, cgroups, capabilities, networking,
-//! and OCI runtime spec support.
+//! A high-performance, daemonless OCI container runtime and library written in Zig.
+//!
+//! ## Technical Specifications
+//! - **OCI Standards**: Implements the OCI runtime and image specifications.
+//! - **Zig Implementation**: predictable performance and memory safety.
+//! - **Daemonless**: Executes containers without a background process.
+//! - **Library & CLI**: Provides a standalone binary and a Zig module for integration.
+//!
+//! ## Installation
+//!
+//! ### Prerequisites
+//! - Zig 0.13.0 or later
+//! - Linux (for runtime features)
+//!
+//! ### Using as a Library
+//! Add `runz` to your `build.zig.zon`:
+//! ```zig
+//! .dependencies = .{
+//!     .runz = .{
+//!         .url = "git+https://github.com/ananthb/runz",
+//!         .hash = "...",
+//!     },
+//! },
+//! ```
+//!
+//! ## Basic Usage
+//!
+//! ### Pulling an Image
+//! ```zig
+//! const std = @import("std");
+//! const runz = @import("runz");
+//!
+//! pub fn main() !void {
+//!     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//!     const allocator = gpa.allocator();
+//!     defer _ = gpa.deinit();
+//!
+//!     var client = try runz.registry.RegistryClient.init(allocator, "registry-1.docker.io");
+//!     defer client.deinit();
+//!
+//!     try client.ensureAuth("library/alpine");
+//!     const manifest = try client.fetchManifest("library/alpine", "latest", null);
+//! }
+//! ```
 
 /// OCI spec types (image, runtime, distribution)
 pub const spec = @import("ocispec");
@@ -63,7 +104,3 @@ pub const annotations = @import("annotations.zig");
 
 /// Linux-specific utilities (namespaces, mounts, seccomp, cgroups, capabilities)
 pub const linux_util = @import("linux.zig");
-
-test "docs" {
-    _ = @import("std").testing;
-}
