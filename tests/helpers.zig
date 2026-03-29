@@ -13,8 +13,8 @@ pub fn createTestBundle(allocator: std.mem.Allocator, config_json: []const u8) !
     defer dir.close();
 
     const dirs = [_][]const u8{
-        "rootfs/bin", "rootfs/dev", "rootfs/etc",
-        "rootfs/proc", "rootfs/sys", "rootfs/tmp",
+        "rootfs/bin",     "rootfs/dev", "rootfs/etc",
+        "rootfs/proc",    "rootfs/sys", "rootfs/tmp",
         "rootfs/usr/bin", "rootfs/var",
     };
     for (dirs) |d| dir.makePath(d) catch {};
@@ -67,14 +67,14 @@ pub fn cleanupBundle(path: []const u8) void {
 pub fn minimalConfig(allocator: std.mem.Allocator, args: []const []const u8) ![]const u8 {
     var args_json: std.ArrayListUnmanaged(u8) = .{};
     defer args_json.deinit(allocator);
-    try args_json.appendSlice(allocator,"[");
+    try args_json.appendSlice(allocator, "[");
     for (args, 0..) |arg, i| {
         if (i > 0) try args_json.appendSlice(allocator, ",");
         try args_json.appendSlice(allocator, "\"");
         try args_json.appendSlice(allocator, arg);
         try args_json.appendSlice(allocator, "\"");
     }
-    try args_json.appendSlice(allocator,"]");
+    try args_json.appendSlice(allocator, "]");
 
     return std.fmt.allocPrint(allocator,
         \\{{
@@ -99,14 +99,14 @@ pub fn minimalConfig(allocator: std.mem.Allocator, args: []const []const u8) ![]
 pub fn configWithLimits(allocator: std.mem.Allocator, args: []const []const u8, memory_limit: u64, pids_max: u32) ![]const u8 {
     var args_json: std.ArrayListUnmanaged(u8) = .{};
     defer args_json.deinit(allocator);
-    try args_json.appendSlice(allocator,"[");
+    try args_json.appendSlice(allocator, "[");
     for (args, 0..) |arg, i| {
         if (i > 0) try args_json.appendSlice(allocator, ",");
         try args_json.appendSlice(allocator, "\"");
         try args_json.appendSlice(allocator, arg);
         try args_json.appendSlice(allocator, "\"");
     }
-    try args_json.appendSlice(allocator,"]");
+    try args_json.appendSlice(allocator, "]");
 
     return std.fmt.allocPrint(allocator,
         \\{{
@@ -135,14 +135,14 @@ pub fn configWithLimits(allocator: std.mem.Allocator, args: []const []const u8, 
 pub fn configWithNetwork(allocator: std.mem.Allocator, args: []const []const u8) ![]const u8 {
     var args_json: std.ArrayListUnmanaged(u8) = .{};
     defer args_json.deinit(allocator);
-    try args_json.appendSlice(allocator,"[");
+    try args_json.appendSlice(allocator, "[");
     for (args, 0..) |arg, i| {
         if (i > 0) try args_json.appendSlice(allocator, ",");
         try args_json.appendSlice(allocator, "\"");
         try args_json.appendSlice(allocator, arg);
         try args_json.appendSlice(allocator, "\"");
     }
-    try args_json.appendSlice(allocator,"]");
+    try args_json.appendSlice(allocator, "]");
 
     return std.fmt.allocPrint(allocator,
         \\{{

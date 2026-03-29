@@ -139,11 +139,9 @@ fn cmdCreate(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.proc
         }
     }
 
-    if (console_socket) |_| {} // TODO: wire console socket into lifecycle.create
-
     const id = container_id orelse return fatal("create requires a container ID");
 
-    const child_pid = runz.lifecycle.create(allocator, id, bundle, root_dir) catch |err| {
+    const child_pid = runz.lifecycle.createWithOptions(allocator, id, bundle, root_dir, console_socket) catch |err| {
         return fatal2("create failed: {}", .{err});
     };
 

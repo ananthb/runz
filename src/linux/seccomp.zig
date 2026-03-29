@@ -43,8 +43,9 @@ const AUDIT_ARCH_X86_64 = 0xC000003E;
 const AUDIT_ARCH_AARCH64 = 0xC00000B7;
 
 pub const SeccompFilter = struct {
-    instructions: [512]SockFilter = undefined,
+    instructions: [2048]SockFilter = undefined,
     len: usize = 0,
+    default_action: u32 = SECCOMP_RET_ALLOW,
 
     pub fn init() SeccompFilter {
         var self = SeccompFilter{};
@@ -67,9 +68,21 @@ pub const SeccompFilter = struct {
         self.addInstruction(.{ .code = BPF_RET | BPF_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ERRNO | 1 }); // EPERM = 1
     }
 
-    /// Add the default allow action (call after all blockSyscall calls)
-    pub fn finalize(self: *SeccompFilter) void {
+    /// Allow a specific syscall (used when default action is deny)
+    pub fn allowSyscall(self: *SeccompFilter, nr: usize) void {
+        self.addInstruction(.{ .code = BPF_JMP | BPF_JEQ | BPF_K, .jt = 0, .jf = 1, .k = @intCast(nr) });
         self.addInstruction(.{ .code = BPF_RET | BPF_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW });
+    }
+
+    /// Kill process on a specific syscall
+    pub fn killSyscall(self: *SeccompFilter, nr: usize) void {
+        self.addInstruction(.{ .code = BPF_JMP | BPF_JEQ | BPF_K, .jt = 0, .jf = 1, .k = @intCast(nr) });
+        self.addInstruction(.{ .code = BPF_RET | BPF_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS });
+    }
+
+    /// Finalize with the configured default action
+    pub fn finalize(self: *SeccompFilter) void {
+        self.addInstruction(.{ .code = BPF_RET | BPF_K, .jt = 0, .jf = 0, .k = self.default_action });
     }
 
     /// Install the filter using prctl
@@ -113,6 +126,58 @@ pub fn defaultFilter() SeccompFilter {
 
     filter.finalize();
     return filter;
+}
+
+/// Build a seccomp filter from an OCI runtime spec seccomp section.
+pub fn fromSpec(spec: anytype) SeccompFilter {
+    var filter = SeccompFilter.init();
+
+    // Parse default action
+    filter.default_action = parseAction(spec.defaultAction);
+
+    // Process syscall rules
+    if (spec.syscalls) |syscalls| {
+        for (syscalls) |rule| {
+            const action = parseAction(rule.action);
+            for (rule.names) |name| {
+                if (syscallFromName(name)) |nr| {
+                    if (action == SECCOMP_RET_ALLOW) {
+                        filter.allowSyscall(nr);
+                    } else if (action == SECCOMP_RET_KILL_PROCESS) {
+                        filter.killSyscall(nr);
+                    } else {
+                        filter.blockSyscall(nr);
+                    }
+                }
+            }
+        }
+    }
+
+    filter.finalize();
+    return filter;
+}
+
+fn parseAction(action: []const u8) u32 {
+    if (std.mem.eql(u8, action, "SCMP_ACT_ALLOW")) return SECCOMP_RET_ALLOW;
+    if (std.mem.eql(u8, action, "SCMP_ACT_ERRNO")) return SECCOMP_RET_ERRNO | 1;
+    if (std.mem.eql(u8, action, "SCMP_ACT_KILL")) return SECCOMP_RET_KILL_PROCESS;
+    if (std.mem.eql(u8, action, "SCMP_ACT_KILL_PROCESS")) return SECCOMP_RET_KILL_PROCESS;
+    if (std.mem.eql(u8, action, "SCMP_ACT_TRAP")) return 0x00030000; // SECCOMP_RET_TRAP
+    if (std.mem.eql(u8, action, "SCMP_ACT_LOG")) return 0x7ffc0000; // SECCOMP_RET_LOG
+    return SECCOMP_RET_ERRNO | 1; // default to EPERM
+}
+
+/// Look up a syscall number by name. Uses the target architecture's SYS enum.
+pub fn syscallFromName(name: []const u8) ?usize {
+    const SYS = linux.SYS;
+    // Use comptime reflection to match syscall names
+    const fields = @typeInfo(SYS).@"enum".fields;
+    inline for (fields) |field| {
+        if (std.mem.eql(u8, name, field.name)) {
+            return field.value;
+        }
+    }
+    return null;
 }
 
 fn getBlockedSyscalls() []const usize {

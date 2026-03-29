@@ -234,6 +234,73 @@ fn parseConfigManual(allocator: std.mem.Allocator, data: []const u8) !Spec {
         if (lnx.object.get("readonlyPaths")) |rp| {
             linux_spec.readonlyPaths = try parseStringArray(allocator, rp);
         }
+        if (lnx.object.get("cgroupsPath")) |cp| {
+            if (cp == .string) linux_spec.cgroupsPath = try allocator.dupe(u8, cp.string);
+        }
+        // Parse seccomp
+        if (lnx.object.get("seccomp")) |sec| {
+            var seccomp_spec = Seccomp{};
+            if (sec.object.get("defaultAction")) |da| {
+                if (da == .string) seccomp_spec.defaultAction = try allocator.dupe(u8, da.string);
+            }
+            if (sec.object.get("architectures")) |arches| {
+                seccomp_spec.architectures = try parseStringArray(allocator, arches);
+            }
+            if (sec.object.get("syscalls")) |sc_arr| {
+                if (sc_arr == .array) {
+                    var rules: std.ArrayListUnmanaged(SyscallRule) = .{};
+                    for (sc_arr.array.items) |sc| {
+                        if (sc != .object) continue;
+                        const action_val = sc.object.get("action") orelse continue;
+                        if (action_val != .string) continue;
+                        const names_val = sc.object.get("names") orelse continue;
+                        const names = try parseStringArray(allocator, names_val);
+                        try rules.append(allocator, .{
+                            .names = names,
+                            .action = try allocator.dupe(u8, action_val.string),
+                        });
+                    }
+                    if (rules.items.len > 0) seccomp_spec.syscalls = try rules.toOwnedSlice(allocator);
+                }
+            }
+            linux_spec.seccomp = seccomp_spec;
+        }
+        // Parse resources
+        if (lnx.object.get("resources")) |res| {
+            var linux_res = LinuxResources{};
+            if (res.object.get("memory")) |mem| {
+                var mr = MemoryResources{};
+                if (mem.object.get("limit")) |l| {
+                    if (l == .integer) mr.limit = l.integer;
+                }
+                if (mem.object.get("swap")) |s| {
+                    if (s == .integer) mr.swap = s.integer;
+                }
+                linux_res.memory = mr;
+            }
+            if (res.object.get("cpu")) |cpu| {
+                var cr = CpuResources{};
+                if (cpu.object.get("shares")) |s| {
+                    if (s == .integer) cr.shares = @intCast(s.integer);
+                }
+                if (cpu.object.get("quota")) |q| {
+                    if (q == .integer) cr.quota = q.integer;
+                }
+                if (cpu.object.get("period")) |p| {
+                    if (p == .integer) cr.period = @intCast(p.integer);
+                }
+                if (cpu.object.get("cpus")) |c| {
+                    if (c == .string) cr.cpus = try allocator.dupe(u8, c.string);
+                }
+                linux_res.cpu = cr;
+            }
+            if (res.object.get("pids")) |pids| {
+                if (pids.object.get("limit")) |l| {
+                    if (l == .integer) linux_res.pids = .{ .limit = l.integer };
+                }
+            }
+            linux_spec.resources = linux_res;
+        }
         spec.linux = linux_spec;
     }
 

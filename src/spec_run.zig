@@ -105,6 +105,7 @@ pub fn runFromBundle(
         .mounts = spec.mounts,
         .capabilities = cap_set,
         .cwd = if (!std.mem.eql(u8, process.cwd, "/")) process.cwd else null,
+        .seccomp = if (spec.linux) |lnx| lnx.seccomp else null,
     };
 
     // Set up cgroup resources if specified

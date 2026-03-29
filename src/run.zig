@@ -54,6 +54,8 @@ pub const ContainerOptions = struct {
     capabilities: ?@import("linux/capabilities.zig").CapSet = null,
     /// Working directory (null = /)
     cwd: ?[]const u8 = null,
+    /// Seccomp spec (null = use default filter)
+    seccomp: ?@import("runtime_spec.zig").Seccomp = null,
 };
 
 /// Execute a short-lived command inside a rootfs with container isolation.
@@ -413,7 +415,7 @@ fn pivotAndExec(
     doExec(allocator, argv, options.env);
 }
 
-/// Apply capabilities and no_new_privs before exec
+/// Apply capabilities, seccomp, and no_new_privs before exec
 fn applyPreExec(options: *const ContainerOptions, caps_mod: anytype) void {
     // Apply capabilities if specified
     if (options.capabilities) |cap_set| {
@@ -421,6 +423,14 @@ fn applyPreExec(options: *const ContainerOptions, caps_mod: anytype) void {
     }
     // Set no_new_privs (default for OCI containers)
     caps_mod.setNoNewPrivs();
+    // Apply seccomp filter
+    if (options.seccomp) |sec| {
+        var filter = @import("linux/seccomp.zig").fromSpec(sec);
+        filter.install() catch {};
+    } else {
+        var filter = @import("linux/seccomp.zig").defaultFilter();
+        filter.install() catch {};
+    }
 }
 
 /// Build argv/envp and exec

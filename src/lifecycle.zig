@@ -29,6 +29,16 @@ pub fn create(
     bundle_path: []const u8,
     root_dir: []const u8,
 ) LifecycleError!i32 {
+    return createWithOptions(allocator, container_id, bundle_path, root_dir, null);
+}
+
+pub fn createWithOptions(
+    allocator: std.mem.Allocator,
+    container_id: []const u8,
+    bundle_path: []const u8,
+    root_dir: []const u8,
+    console_socket_path: ?[]const u8,
+) LifecycleError!i32 {
     // Parse config.json
     const config_path = std.fmt.allocPrint(allocator, "{s}/config.json", .{bundle_path}) catch
         return error.OutOfMemory;
@@ -117,6 +127,26 @@ pub fn create(
         if (spec.linux) |lnx| {
             if (lnx.maskedPaths) |mp| paths.applyMaskedPaths(rootfs_path, mp, allocator);
             if (lnx.readonlyPaths) |rp| paths.applyReadonlyPaths(rootfs_path, rp, allocator);
+        }
+
+        // Set up console socket if terminal is requested
+        if (console_socket_path) |cs_path| {
+            if (spec.process) |proc| {
+                if (proc.terminal) {
+                    const console = @import("linux/console.zig");
+                    if (console.setupConsoleSocket(rootfs_path, cs_path)) |slave_fd| {
+                        // Dup slave fd to stdin/stdout/stderr (use dup3 for aarch64 compat)
+                        _ = linux.syscall3(.dup3, @as(usize, @intCast(slave_fd)), 0, 0);
+                        _ = linux.syscall3(.dup3, @as(usize, @intCast(slave_fd)), 1, 0);
+                        _ = linux.syscall3(.dup3, @as(usize, @intCast(slave_fd)), 2, 0);
+                        if (slave_fd > 2) _ = linux.close(@intCast(@as(u32, @bitCast(slave_fd))));
+                        // Set controlling terminal
+                        _ = linux.syscall3(.ioctl, 0, 0x540E, 0); // TIOCSCTTY
+                    } else |_| {
+                        scoped_log.warn("Console socket setup failed", .{});
+                    }
+                }
+            }
         }
 
         // Block on FIFO — wait for `start` command
