@@ -7,6 +7,7 @@ export default defineConfig({
 			title: 'runz',
 			description: 'OCI container runtime and library in Zig',
 			customCss: ['./src/styles/custom.css'],
+            disable404Route: true,
 			social: {
 				github: 'https://github.com/ananthb/runz',
 			},
