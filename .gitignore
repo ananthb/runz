@@ -7,3 +7,4 @@ result-*
 docs/public/api/
 docs/dist/
 docs/node_modules/
+docs/.astro/
