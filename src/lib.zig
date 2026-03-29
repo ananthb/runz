@@ -43,6 +43,9 @@ pub const hooks = @import("hooks.zig");
 /// Daemonless container runner (like podman run)
 pub const runz = @import("runz.zig");
 
+/// Run a container from an OCI runtime spec bundle
+pub const spec_run = @import("spec_run.zig");
+
 /// Execute processes inside running containers (nsenter)
 pub const exec = @import("exec.zig");
 

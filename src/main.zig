@@ -61,6 +61,8 @@ pub fn main() !void {
         try cmdList(allocator, root_dir);
     } else if (std.mem.eql(u8, cmd, "exec")) {
         try cmdExec(allocator, root_dir, &args);
+    } else if (std.mem.eql(u8, cmd, "run")) {
+        try cmdRun(allocator, root_dir, &args);
     } else if (std.mem.eql(u8, cmd, "spec")) {
         try cmdSpec();
     } else {
@@ -69,6 +71,33 @@ pub fn main() !void {
 }
 
 // --- Commands ---
+
+fn cmdRun(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process.ArgIterator) !void {
+    var bundle: []const u8 = ".";
+    var container_id: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--bundle")) {
+            bundle = args.next() orelse return fatal("--bundle requires a path");
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (container_id == null) {
+                container_id = arg;
+            }
+        } else {
+            return fatal2("run: unknown option: {s}", .{arg});
+        }
+    }
+
+    const id = container_id orelse return fatal("run requires a container ID");
+
+    const exit_code = runz.spec_run.runFromBundle(allocator, bundle, id, root_dir) catch |err| {
+        return fatal2("run failed: {}", .{err});
+    };
+
+    if (exit_code != 0) {
+        std.process.exit(exit_code);
+    }
+}
 
 fn cmdCreate(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process.ArgIterator) !void {
     var bundle: []const u8 = ".";
@@ -280,7 +309,8 @@ fn printUsage() void {
         \\Usage: runz [global-options] <command> [args]
         \\
         \\Commands:
-        \\  create <id> -b <bundle>  Create a container
+        \\  run <id> -b <bundle>     Create and start a container
+        \\  create <id> -b <bundle>  Create a container (paused)
         \\  start <id>               Start a created container
         \\  kill <id> [signal]       Send signal to container (default: SIGTERM)
         \\  delete <id>              Delete a stopped container
