@@ -3,34 +3,34 @@ title: "runz"
 description: OCI container runtime and library in Zig.
 template: splash
 hero:
-  tagline: "High-performance OCI container runtime and library."
+  tagline: "OCI container runtime and library in Zig."
   image:
     html: '<div style="font-size: 10rem; filter: drop-shadow(0 0 20px #00ff00);">🧬</div>'
   actions:
-    - text: Get Started
+    - text: Documentation
       link: /guides/getting-started/
       icon: right-arrow
       variant: primary
-    - text: View on GitHub
+    - text: Source Code
       link: https://github.com/ananthb/runz
       icon: external
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Core Features
+## Technical Specifications
 
 <CardGrid stagger>
-	<Card title="OCI Compliant" icon="approve-check-circle">
-		Full support for OCI runtime and image specifications.
+	<Card title="OCI Standards" icon="approve-check-circle">
+		Implements the OCI runtime and image specifications.
 	</Card>
-	<Card title="Built in Zig" icon="rocket">
-		Engineered for performance, safety, and zero-overhead execution.
+	<Card title="Zig Implementation" icon="rocket">
+		Written in Zig for predictable performance and memory safety.
 	</Card>
 	<Card title="Daemonless" icon="setting">
-		Standalone execution without a background process.
+		Executes containers without a background process or service.
 	</Card>
-	<Card title="Library First" icon="open-book">
-		Modular design for seamless integration into Zig applications.
+	<Card title="Library & CLI" icon="open-book">
+		Provides a standalone binary and a Zig module for integration.
 	</Card>
 </CardGrid>
