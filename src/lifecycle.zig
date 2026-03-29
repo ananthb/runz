@@ -140,7 +140,7 @@ pub fn create(
         const grandchild: i32 = @bitCast(@as(u32, @truncate(inner_result)));
         if (grandchild == 0) {
             // Grandchild: pivot_root and exec
-            doContainerExec(allocator, rootfs_path, argv, process.env, process.cwd);
+            doContainerExec(allocator, rootfs_path, argv, process.env, process.cwd, process.capabilities, process.noNewPrivileges);
             std.process.exit(127);
         }
 
@@ -200,14 +200,37 @@ pub fn start(
     const state_path = std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ root_dir, container_id }) catch return;
     defer allocator.free(state_path);
 
-    // Read current state to get PID
-    const state_file = std.fs.openFileAbsolute(state_path, .{}) catch return;
-    defer state_file.close();
-    var buf: [4096]u8 = undefined;
-    const n = state_file.readAll(&buf) catch return;
-    _ = n;
+    // Read current state to get PID, then rewrite with "running"
+    {
+        const state_file = std.fs.openFileAbsolute(state_path, .{}) catch return;
+        var buf: [4096]u8 = undefined;
+        const n = state_file.readAll(&buf) catch {
+            state_file.close();
+            return;
+        };
+        state_file.close();
 
-    // TODO: parse PID from state and update status to "running"
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, buf[0..n], .{}) catch return;
+        defer parsed.deinit();
+
+        var pid: i64 = 0;
+        var bundle: []const u8 = "";
+        if (parsed.value.object.get("pid")) |p| {
+            if (p == .integer) pid = p.integer;
+        }
+        if (parsed.value.object.get("bundle")) |b| {
+            if (b == .string) bundle = b.string;
+        }
+
+        const updated = std.fmt.allocPrint(allocator,
+            \\{{"ociVersion":"1.0.2","id":"{s}","status":"running","pid":{d},"bundle":"{s}"}}
+        , .{ container_id, pid, bundle }) catch return;
+        defer allocator.free(updated);
+
+        const wf = std.fs.openFileAbsolute(state_path, .{ .mode = .write_only }) catch return;
+        defer wf.close();
+        wf.writeAll(updated) catch {};
+    }
 }
 
 fn doContainerExec(
@@ -216,6 +239,8 @@ fn doContainerExec(
     argv: []const []const u8,
     env: ?[]const []const u8,
     cwd: []const u8,
+    proc_caps: ?runtime_spec.Capabilities,
+    no_new_privs: bool,
 ) void {
     // Ensure rootfs is a mount point
     {
@@ -253,7 +278,18 @@ fn doContainerExec(
     mount_util.umountDetach("/mnt/oldroot") catch {};
 
     // Apply capabilities
-    capabilities.setNoNewPrivs();
+    if (proc_caps) |caps| {
+        const names = caps.effective orelse caps.bounding orelse null;
+        if (names) |n| {
+            const cap_set = capabilities.CapSet.fromNames(n);
+            capabilities.applyCaps(cap_set) catch {};
+        } else {
+            capabilities.applyCaps(capabilities.CapSet.defaultSet()) catch {};
+        }
+    }
+    if (no_new_privs) {
+        capabilities.setNoNewPrivs();
+    }
 
     // exec
     var c_argv: std.ArrayListUnmanaged(?[*:0]const u8) = .{};

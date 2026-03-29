@@ -91,6 +91,26 @@ pub fn execInContainer(
         std.process.exit(127);
     }
 
+    // Join the container's cgroup
+    {
+        const child_pid: i32 = @bitCast(@as(u32, @truncate(fork_rc)));
+        const cg_path = getContainerCgroupPath(allocator, container_pid);
+        if (cg_path) |path| {
+            defer allocator.free(path);
+            var procs_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const procs_path = std.fmt.bufPrint(&procs_buf, "{s}/cgroup.procs", .{path}) catch null;
+            if (procs_path) |pp| {
+                const f = std.fs.openFileAbsolute(pp, .{ .mode = .write_only }) catch null;
+                if (f) |file| {
+                    defer file.close();
+                    var pid_buf: [32]u8 = undefined;
+                    const pid_str = std.fmt.bufPrint(&pid_buf, "{d}", .{child_pid}) catch "";
+                    file.writeAll(pid_str) catch {};
+                }
+            }
+        }
+    }
+
     // Parent: wait for child
     var status: u32 = 0;
     while (true) {
@@ -138,6 +158,27 @@ fn doExec(allocator: std.mem.Allocator, argv: []const []const u8, env: ?[]const 
     const cmd_z = allocator.dupeZ(u8, argv[0]) catch return;
     const err = std.posix.execveZ(cmd_z, @ptrCast(c_argv.items.ptr), @ptrCast(c_envp.items.ptr));
     scoped_log.err("execve failed: {}", .{err});
+}
+
+/// Get the cgroup path for a container process by reading /proc/<pid>/cgroup
+fn getContainerCgroupPath(allocator: std.mem.Allocator, pid: i32) ?[]const u8 {
+    var path_buf: [64]u8 = undefined;
+    const proc_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cgroup", .{pid}) catch return null;
+    const file = std.fs.openFileAbsolute(proc_path, .{}) catch return null;
+    defer file.close();
+
+    var buf: [4096]u8 = undefined;
+    const n = file.readAll(&buf) catch return null;
+
+    // cgroup v2: line starts with "0::" followed by path
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "0::")) {
+            const suffix = line[3..];
+            return std.fmt.allocPrint(allocator, "/sys/fs/cgroup{s}", .{suffix}) catch null;
+        }
+    }
+    return null;
 }
 
 test "ExecError type" {

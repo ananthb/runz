@@ -27,6 +27,10 @@ pub fn main() !void {
             root_dir = args.next() orelse return fatal("--root requires a path");
         } else if (std.mem.eql(u8, arg, "--log")) {
             log_path = args.next() orelse return fatal("--log requires a path");
+        } else if (std.mem.eql(u8, arg, "--log-format")) {
+            _ = args.next(); // accept and ignore (always JSON when --log is set)
+        } else if (std.mem.eql(u8, arg, "--systemd-cgroup")) {
+            // accept podman flag, ignore for now
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
             try std.fs.File.stdout().deprecatedWriter().print("runz version {s}\n", .{version});
             return;
@@ -41,8 +45,22 @@ pub fn main() !void {
         }
     }
 
-    // TODO: redirect logs to log_path if set
-    if (log_path) |_| {}
+    // Redirect logs to file if --log is set
+    if (log_path) |lp| {
+        const dir_path = std.fs.path.dirname(lp) orelse "/";
+        var dir = std.fs.openDirAbsolute(dir_path, .{}) catch |err| {
+            return fatal2("cannot open log dir: {}", .{err});
+        };
+        const log_file = dir.createFile(std.fs.path.basename(lp), .{ .truncate = false }) catch |err| {
+            dir.close();
+            return fatal2("cannot open log file: {}", .{err});
+        };
+        dir.close();
+        // Redirect stderr to the log file
+        const stderr_fd = std.posix.STDERR_FILENO;
+        std.posix.dup2(log_file.handle, stderr_fd) catch {};
+        log_file.close();
+    }
 
     const cmd = command orelse {
         printUsage();
@@ -104,10 +122,16 @@ fn cmdRun(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process
 fn cmdCreate(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process.ArgIterator) !void {
     var bundle: []const u8 = ".";
     var container_id: ?[]const u8 = null;
+    var pid_file: ?[]const u8 = null;
+    var console_socket: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--bundle")) {
             bundle = args.next() orelse return fatal("--bundle requires a path");
+        } else if (std.mem.eql(u8, arg, "--pid-file")) {
+            pid_file = args.next() orelse return fatal("--pid-file requires a path");
+        } else if (std.mem.eql(u8, arg, "--console-socket")) {
+            console_socket = args.next() orelse return fatal("--console-socket requires a path");
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             container_id = arg;
         } else {
@@ -115,11 +139,25 @@ fn cmdCreate(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.proc
         }
     }
 
+    if (console_socket) |_| {} // TODO: wire console socket into lifecycle.create
+
     const id = container_id orelse return fatal("create requires a container ID");
 
-    _ = runz.lifecycle.create(allocator, id, bundle, root_dir) catch |err| {
+    const child_pid = runz.lifecycle.create(allocator, id, bundle, root_dir) catch |err| {
         return fatal2("create failed: {}", .{err});
     };
+
+    // Write PID file if requested
+    if (pid_file) |pf| {
+        var buf: [32]u8 = undefined;
+        const pid_str = std.fmt.bufPrint(&buf, "{d}", .{child_pid}) catch return;
+        const dir_path = std.fs.path.dirname(pf) orelse "/";
+        var dir = std.fs.openDirAbsolute(dir_path, .{}) catch return;
+        defer dir.close();
+        var file = dir.createFile(std.fs.path.basename(pf), .{}) catch return;
+        defer file.close();
+        file.writeAll(pid_str) catch {};
+    }
 }
 
 fn cmdStart(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process.ArgIterator) !void {
@@ -191,8 +229,55 @@ fn cmdState(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.proce
     var buf: [4096]u8 = undefined;
     const n = file.readAll(&buf) catch return;
 
+    // Check PID liveness and update status
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, buf[0..n], .{}) catch {
+        const stdout = std.fs.File.stdout().deprecatedWriter();
+        try stdout.writeAll(buf[0..n]);
+        try stdout.writeAll("\n");
+        return;
+    };
+    defer parsed.deinit();
+
+    var status: []const u8 = "unknown";
+    var pid: i64 = 0;
+    var bundle: []const u8 = "";
+
+    if (parsed.value.object.get("status")) |s| {
+        if (s == .string) status = s.string;
+    }
+    if (parsed.value.object.get("pid")) |p| {
+        if (p == .integer) pid = p.integer;
+    }
+    if (parsed.value.object.get("bundle")) |b| {
+        if (b == .string) bundle = b.string;
+    }
+
+    // If PID is set and process is dead, mark as stopped
+    if (pid > 0) {
+        const kill_rc = std.os.linux.kill(@intCast(pid), 0);
+        if (std.os.linux.E.init(kill_rc) != .SUCCESS) {
+            status = "stopped";
+            pid = 0;
+            // Update state file
+            const updated = std.fmt.allocPrint(allocator,
+                \\{{"ociVersion":"1.0.2","id":"{s}","status":"stopped","pid":0,"bundle":"{s}"}}
+            , .{ id, bundle }) catch null;
+            if (updated) |u| {
+                const wf = std.fs.openFileAbsolute(state_path, .{ .mode = .write_only }) catch null;
+                if (wf) |f| {
+                    defer f.close();
+                    f.writeAll(u) catch {};
+                }
+            }
+        }
+    }
+
+    const output = std.fmt.allocPrint(allocator,
+        \\{{"ociVersion":"1.0.2","id":"{s}","status":"{s}","pid":{d},"bundle":"{s}"}}
+    , .{ id, status, pid, bundle }) catch return;
+
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    try stdout.writeAll(buf[0..n]);
+    try stdout.writeAll(output);
     try stdout.writeAll("\n");
 }
 

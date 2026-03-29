@@ -151,6 +151,9 @@ test "cli: runz list with custom root" {
 // the state management path only.
 
 test "cli: create and delete lifecycle" {
+    // create now forks container processes which requires root
+    if (std.os.linux.getuid() != 0) return;
+
     const allocator = std.testing.allocator;
 
     const ts2: u64 = @intCast(std.time.timestamp());

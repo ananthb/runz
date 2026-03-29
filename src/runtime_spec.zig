@@ -164,6 +164,17 @@ fn parseConfigManual(allocator: std.mem.Allocator, data: []const u8) !Spec {
             .args = if (p.object.get("args")) |a| try parseStringArray(allocator, a) else null,
             .env = if (p.object.get("env")) |e| try parseStringArray(allocator, e) else null,
             .noNewPrivileges = if (p.object.get("noNewPrivileges")) |n| (n == .bool and n.bool) else true,
+            .user = if (p.object.get("user")) |u| User{
+                .uid = if (u.object.get("uid")) |uid| (if (uid == .integer) @intCast(uid.integer) else 0) else 0,
+                .gid = if (u.object.get("gid")) |gid| (if (gid == .integer) @intCast(gid.integer) else 0) else 0,
+            } else null,
+            .capabilities = if (p.object.get("capabilities")) |caps_obj| Capabilities{
+                .bounding = if (caps_obj.object.get("bounding")) |b| try parseStringArray(allocator, b) else null,
+                .effective = if (caps_obj.object.get("effective")) |e| try parseStringArray(allocator, e) else null,
+                .inheritable = if (caps_obj.object.get("inheritable")) |i| try parseStringArray(allocator, i) else null,
+                .permitted = if (caps_obj.object.get("permitted")) |pp| try parseStringArray(allocator, pp) else null,
+                .ambient = if (caps_obj.object.get("ambient")) |a| try parseStringArray(allocator, a) else null,
+            } else null,
         };
     }
 
