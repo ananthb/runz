@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
 
     const runz_module = b.addModule("runz", .{
         .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
         .imports = &.{
             .{ .name = "ocispec", .module = ocispec_module },
         },
