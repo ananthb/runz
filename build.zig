@@ -118,11 +118,7 @@ pub fn build(b: *std.Build) void {
 
     const docs_lib = b.addLibrary(.{
         .name = "runz-docs",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/lib.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = runz_module,
     });
 
     const docs_install = b.addInstallDirectory(.{
