@@ -124,11 +124,6 @@ pub fn parseConfigFile(allocator: std.mem.Allocator, path: []const u8) !Spec {
 
 /// Parse an OCI runtime spec config.json from bytes
 pub fn parseConfig(allocator: std.mem.Allocator, data: []const u8) !Spec {
-    const parsed = try std.json.parseFromSlice(Spec, allocator, data, .{
-        .ignore_unknown_fields = true,
-    });
-    _ = parsed; // Ownership transferred; caller must manage
-    // For now, return a manually-built Spec from the JSON
     return parseConfigManual(allocator, data);
 }
 

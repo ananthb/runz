@@ -41,8 +41,36 @@ pub fn build(b: *std.Build) void {
         .root_module = test_module,
     });
 
-    const test_step = b.step("test", "Run tests");
+    const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // Layer 1: Library integration tests
+    const integration_module = b.createModule(.{
+        .root_source_file = b.path("tests/integration.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    integration_module.addImport("runz", runz_module);
+    const integration_tests = b.addTest(.{
+        .root_module = integration_module,
+    });
+    const integration_step = b.step("test-integration", "Run library integration tests");
+    integration_step.dependOn(&b.addRunArtifact(integration_tests).step);
+
+    // Layer 2: CLI end-to-end tests (requires built binary)
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("tests/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const cli_tests = b.addTest(.{
+        .root_module = cli_module,
+    });
+    const cli_step = b.step("test-cli", "Run CLI end-to-end tests (requires built binary)");
+    cli_step.dependOn(b.getInstallStep()); // ensure binary is built first
+    cli_step.dependOn(&b.addRunArtifact(cli_tests).step);
 
     // Fuzz targets
     const fuzz_module = b.createModule(.{
