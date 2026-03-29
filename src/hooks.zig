@@ -108,7 +108,7 @@ pub fn parseHooks(allocator: std.mem.Allocator, hooks_json: std.json.Value) !str
     };
 }
 
-fn parseHookList(allocator: std.mem.Allocator, value: std.json.Value) ![]const Hook {
+pub fn parseHookList(allocator: std.mem.Allocator, value: std.json.Value) ![]const Hook {
     if (value != .array) return &.{};
     var list: std.ArrayListUnmanaged(Hook) = .{};
     for (value.array.items) |item| {

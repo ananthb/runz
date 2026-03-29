@@ -132,6 +132,17 @@ pub fn runFromBundle(
         paths.applyDefaults(rootfs_path, allocator);
     }
 
+    // Build state JSON for hooks
+    const state_json_for_hooks = std.fmt.allocPrint(allocator,
+        \\{{"ociVersion":"1.0.2","id":"{s}","status":"creating","pid":0,"bundle":"{s}"}}
+    , .{ container_id, bundle_path }) catch null;
+    defer if (state_json_for_hooks) |s| allocator.free(s);
+
+    // Execute createRuntime hooks (before container start)
+    executeHooksFromConfig(allocator, config_path, "createRuntime", state_json_for_hooks);
+    // Also execute legacy prestart hooks
+    executeHooksFromConfig(allocator, config_path, "prestart", state_json_for_hooks);
+
     // Write state file
     {
         const state_json = std.fmt.allocPrint(allocator,
@@ -166,6 +177,54 @@ pub fn runFromBundle(
         return error.ContainerFailed;
     };
 
+    // Execute poststop hooks
+    {
+        const stopped_state = std.fmt.allocPrint(allocator,
+            \\{{"ociVersion":"1.0.2","id":"{s}","status":"stopped","pid":0,"bundle":"{s}"}}
+        , .{ container_id, bundle_path }) catch null;
+        defer if (stopped_state) |s| allocator.free(s);
+        executeHooksFromConfig(allocator, config_path, "poststop", stopped_state);
+    }
+
     scoped_log.info("Container {s} exited with code {d}", .{ container_id, exit_code });
     return exit_code;
+}
+
+/// Parse hooks from config.json and execute a specific hook point
+fn executeHooksFromConfig(
+    allocator: std.mem.Allocator,
+    config_path_: []const u8,
+    hook_point: []const u8,
+    state_json: ?[]const u8,
+) void {
+    const file = std.fs.openFileAbsolute(config_path_, .{}) catch return;
+    defer file.close();
+
+    var buf: [65536]u8 = undefined;
+    const n = file.readAll(&buf) catch return;
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, buf[0..n], .{}) catch return;
+    defer parsed.deinit();
+
+    const hooks_val = parsed.value.object.get("hooks") orelse return;
+    const hook_list_val = hooks_val.object.get(hook_point) orelse return;
+
+    const hook_set = hooks.parseHookList(allocator, hook_list_val) catch return;
+    defer {
+        for (hook_set) |h| {
+            allocator.free(h.path);
+            if (h.args) |args| {
+                for (args) |a| allocator.free(a);
+                allocator.free(args);
+            }
+        }
+        allocator.free(hook_set);
+    }
+
+    if (hook_set.len == 0) return;
+
+    scoped_log.info("Executing {d} {s} hooks", .{ hook_set.len, hook_point });
+    hooks.executeHooks(allocator, hook_set, state_json orelse "{}") catch |err| {
+        scoped_log.warn("Hook {s} failed: {}", .{ hook_point, err });
+    };
 }

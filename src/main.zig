@@ -115,37 +115,17 @@ fn cmdCreate(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.proc
 
     const id = container_id orelse return fatal("create requires a container ID");
 
-    // Read config.json from bundle
-    const config_path = try std.fmt.allocPrint(allocator, "{s}/config.json", .{bundle});
-    defer allocator.free(config_path);
-
-    _ = runtime_spec.parseConfigFile(allocator, config_path) catch |err| {
-        return fatal2("cannot read config.json: {}", .{err});
-    };
-
-    var mgr = container.Manager.init(allocator, root_dir);
-    var info = mgr.create(id, bundle, null) catch |err| {
+    _ = runz.lifecycle.create(allocator, id, bundle, root_dir) catch |err| {
         return fatal2("create failed: {}", .{err});
     };
-
-    // TODO: fork container process, set up namespaces, pause on FIFO
-    // For now, just create the state entry
-    _ = &info;
 }
 
 fn cmdStart(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process.ArgIterator) !void {
     const id = args.next() orelse return fatal("start requires a container ID");
-    _ = allocator;
 
-    // TODO: signal the container's init process via FIFO to exec
-    const fifo_path = std.fmt.allocPrint(std.heap.page_allocator, "{s}/{s}/exec.fifo", .{ root_dir, id }) catch return;
-    defer std.heap.page_allocator.free(fifo_path);
-
-    const file = std.fs.openFileAbsolute(fifo_path, .{ .mode = .write_only }) catch |err| {
-        return fatal2("cannot signal container {s}: {}", .{ id, err });
+    runz.lifecycle.start(allocator, id, root_dir) catch |err| {
+        return fatal2("start failed: {}", .{err});
     };
-    defer file.close();
-    file.writeAll("s") catch {};
 }
 
 fn cmdKill(allocator: std.mem.Allocator, root_dir: []const u8, args: *std.process.ArgIterator) !void {

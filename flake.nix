@@ -64,6 +64,25 @@ sys.exit(0 if ok else 1)
 
       in
       {
+        packages.default = pkgs.stdenv.mkDerivation {
+          pname = "runz";
+          inherit version;
+          src = ./.;
+
+          nativeBuildInputs = [ pkgs.zig ];
+          dontConfigure = true;
+
+          buildPhase = ''
+            export ZIG_GLOBAL_CACHE_DIR=$(mktemp -d)
+            zig build -Doptimize=ReleaseSafe ${zigBuildArgs}
+          '';
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp zig-out/bin/runz $out/bin/
+          '';
+        };
+
         checks = {
           inherit pre-commit-check;
 

@@ -263,6 +263,10 @@ pub fn runContainer(
 
 /// Set up mounts for a container: bind /dev from host (for device access),
 /// mount proc, sysfs, tmpfs on /tmp, and ensure /dev/net/tun exists.
+pub fn setupContainerMountsPublic(allocator: std.mem.Allocator, rootfs_path: []const u8) void {
+    setupContainerMounts(allocator, rootfs_path) catch {};
+}
+
 fn setupContainerMounts(allocator: std.mem.Allocator, rootfs_path: []const u8) !void {
     {
         var dir = std.fs.openDirAbsolute(rootfs_path, .{}) catch return error.SetupFailed;

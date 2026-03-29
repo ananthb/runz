@@ -46,6 +46,9 @@ pub const runz = @import("runz.zig");
 /// Run a container from an OCI runtime spec bundle
 pub const spec_run = @import("spec_run.zig");
 
+/// OCI container lifecycle (create/start FIFO split)
+pub const lifecycle = @import("lifecycle.zig");
+
 /// Process OCI spec mounts
 pub const spec_mount = @import("spec_mount.zig");
 
