@@ -114,7 +114,25 @@
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",
         "oci-spec-zig": "oci-spec-zig",
-        "pre-commit-hooks": "pre-commit-hooks"
+        "pre-commit-hooks": "pre-commit-hooks",
+        "runtime-tools-src": "runtime-tools-src"
+      }
+    },
+    "runtime-tools-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1773665913,
+        "narHash": "sha256-QsE/8PNLpkqLaOdpG4D+OQTlNyRhkM6ekup7b52z+WU=",
+        "owner": "opencontainers",
+        "repo": "runtime-tools",
+        "rev": "8a4db579f5c88af5a0d036fad34bddc9c1f703f3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "opencontainers",
+        "repo": "runtime-tools",
+        "rev": "8a4db579f5c88af5a0d036fad34bddc9c1f703f3",
+        "type": "github"
       }
     },
     "systems": {

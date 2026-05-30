@@ -12,9 +12,13 @@
       url = "github:navidys/oci-spec-zig";
       flake = false;
     };
+    runtime-tools-src = {
+      url = "github:opencontainers/runtime-tools/8a4db579f5c88af5a0d036fad34bddc9c1f703f3";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, pre-commit-hooks, oci-spec-zig }:
+  outputs = { self, nixpkgs, flake-utils, pre-commit-hooks, oci-spec-zig, runtime-tools-src }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -28,6 +32,49 @@
           mkdir -p $out
           ln -s ${oci-spec-zig} $out/${ociSpecHash}
         '';
+
+        # Upstream OCI runtime-tools validation suite. Builds runtimetest
+        # (injected into each test bundle), oci-runtime-tool (config helper),
+        # and the validation/*.t test binaries. Uses the in-tree vendor/
+        # directory so the build is offline-clean inside the Nix sandbox.
+        oci-runtime-tools = pkgs.stdenv.mkDerivation {
+          pname = "oci-runtime-tools";
+          version = "unstable-2026-03-16";
+          src = runtime-tools-src;
+
+          nativeBuildInputs = [ pkgs.go ];
+
+          dontConfigure = true;
+
+          buildPhase = ''
+            runHook preBuild
+            export HOME=$(mktemp -d)
+            export GOFLAGS=-mod=vendor
+            export CGO_ENABLED=0
+
+            go build -o runtimetest ./cmd/runtimetest
+            go build -o oci-runtime-tool ./cmd/oci-runtime-tool
+
+            for dir in validation/*/; do
+              name=$(basename "$dir")
+              if [ -f "$dir$name.go" ]; then
+                go build -o "$dir$name.t" "./$dir"
+              fi
+            done
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/bin $out/libexec/oci-validation
+            install -m755 runtimetest        $out/bin/
+            install -m755 oci-runtime-tool   $out/bin/
+            for t in validation/*/*.t; do
+              install -m755 "$t" "$out/libexec/oci-validation/"
+            done
+            runHook postInstall
+          '';
+        };
 
         pre-commit-check = pre-commit-hooks.lib.${system}.run {
           src = ./.;
@@ -196,7 +243,13 @@ sys.exit(0 if ok else 1)
             nodejs_22
             python3
             python3Packages.mkdocs-material
+            oci-runtime-tools
           ];
+
+          # Consumed by scripts/oci-validation.sh (invoked by
+          # `zig build test-oci-validation`).
+          OCI_VALIDATION_DIR = "${oci-runtime-tools}/libexec/oci-validation";
+          OCI_RUNTIMETEST   = "${oci-runtime-tools}/bin/runtimetest";
         };
       }
     ) // {

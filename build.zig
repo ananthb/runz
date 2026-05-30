@@ -74,19 +74,22 @@ pub fn build(b: *std.Build) void {
     cli_step.dependOn(b.getInstallStep()); // ensure binary is built first
     cli_step.dependOn(&b.addRunArtifact(cli_tests).step);
 
-    // Layer 3: OCI compliance tests (requires root + built binary)
-    const compliance_module = b.createModule(.{
-        .root_source_file = b.path("tests/compliance.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+    // Layer 3: upstream OCI runtime-tools validation suite.
+    // Runs the same conformance tests that runc/crun/youki use. Requires
+    // root and the env vars OCI_VALIDATION_DIR / OCI_RUNTIMETEST, which
+    // `nix develop` exports from the oci-runtime-tools derivation in
+    // flake.nix. The wrapper script skips cleanly when those aren't set.
+    const oci_validation_step = b.step("test-oci-validation", "Run upstream OCI runtime-tools validation (requires root + nix devShell)");
+    oci_validation_step.dependOn(b.getInstallStep());
+    const oci_validation_run = b.addSystemCommand(&.{
+        "bash",
+        "scripts/oci-validation.sh",
     });
-    const compliance_tests = b.addTest(.{
-        .root_module = compliance_module,
-    });
-    const compliance_step = b.step("test-compliance", "Run OCI compliance tests (requires root + built binary)");
-    compliance_step.dependOn(b.getInstallStep());
-    compliance_step.dependOn(&b.addRunArtifact(compliance_tests).step);
+    oci_validation_run.setEnvironmentVariable(
+        "RUNTIME",
+        b.getInstallPath(.bin, "runz"),
+    );
+    oci_validation_step.dependOn(&oci_validation_run.step);
 
     // Fuzz targets
     const fuzz_module = b.createModule(.{
